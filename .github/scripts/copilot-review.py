@@ -332,7 +332,11 @@ def _build_copilot_cmd(prompt_text, model, max_continues):
         "--autopilot",
         "--max-autopilot-continues", str(max_continues),
         "--no-ask-user",
-        "--allow-tool", "shell(git:*)",
+        "--allow-tool", "shell(git diff:*)",
+        "--allow-tool", "shell(git log:*)",
+        "--allow-tool", "shell(git show:*)",
+        "--allow-tool", "shell(git status:*)",
+        "--allow-tool", "shell(gh pr view:*)",
         "--allow-tool", "shell(cat:*)",
         "--allow-tool", "shell(ls:*)",
         "--allow-tool", "shell(head:*)",
@@ -348,6 +352,25 @@ def _build_opencode_cmd(prompt_text, model):
         "opencode", "run", prompt_text,
         "--model", model,
     ]
+
+
+# Permissions for opencode: read-only git/file inspection, no edits, no web.
+OPENCODE_PERMISSION = json.dumps({
+    "bash": {
+        "*": "deny",
+        "git diff *": "allow",
+        "git log *": "allow",
+        "git show *": "allow",
+        "git status *": "allow",
+        "cat *": "allow",
+        "ls *": "allow",
+        "head *": "allow",
+        "wc *": "allow",
+        "gh pr view *": "allow",
+    },
+    "edit": "deny",
+    "webfetch": "deny",
+})
 
 
 def run_review(prompt_file, model, output_file, max_continues, tool, timeout):
@@ -368,9 +391,15 @@ def run_review(prompt_file, model, output_file, max_continues, tool, timeout):
 
     # stderr inherits the terminal so progress is visible in real-time;
     # only stdout (the final review) is captured to the output file.
+    env = None
+    if tool == "opencode":
+        env = {**os.environ, "OPENCODE_PERMISSION": OPENCODE_PERMISSION}
+
     with open(output_file, "w") as out:
         try:
-            result = subprocess.run(cmd, stdout=out, text=True, timeout=timeout)
+            result = subprocess.run(
+                cmd, stdout=out, text=True, timeout=timeout, env=env,
+            )
         except subprocess.TimeoutExpired:
             elapsed = time.time() - start
             raise RuntimeError(

@@ -87,26 +87,25 @@ jobs:
           REVIEW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REVIEW_RUN_ID: ${{ github.run_id }}
         run: |
-          model_arg=""
-          if [ -n "$REVIEW_MODEL" ]; then
-            model_arg="--model $REVIEW_MODEL"
-          fi
-
-          inline_arg=""
-          if [ "$REVIEW_INLINE" = "true" ]; then
-            inline_arg="--inline-review"
-          fi
-
-          python3 .automation/.github/scripts/copilot-review.py \
-            --repo "$REVIEW_REPO" \
-            --pr-number "$REVIEW_PR_NUMBER" \
-            --tool "$REVIEW_TOOL" \
-            $model_arg \
-            $inline_arg \
-            --additional-instructions "$REVIEW_INSTRUCTIONS" \
-            --comment-id "$REVIEW_COMMENT_ID" \
-            --run-url "$REVIEW_RUN_URL" \
+          args=(
+            --repo "$REVIEW_REPO"
+            --pr-number "$REVIEW_PR_NUMBER"
+            --tool "$REVIEW_TOOL"
+            --additional-instructions "$REVIEW_INSTRUCTIONS"
+            --comment-id "$REVIEW_COMMENT_ID"
+            --run-url "$REVIEW_RUN_URL"
             --run-id "$REVIEW_RUN_ID"
+          )
+
+          if [ -n "$REVIEW_MODEL" ]; then
+            args+=(--model "$REVIEW_MODEL")
+          fi
+
+          if [ "$REVIEW_INLINE" = "true" ]; then
+            args+=(--inline-review)
+          fi
+
+          python3 .automation/.github/scripts/copilot-review.py "${args[@]}"
 
       - name: Upload review artifact
         if: always()

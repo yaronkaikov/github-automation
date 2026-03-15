@@ -38,11 +38,11 @@ python3 .github/scripts/copilot-review.py \
 
 ### CI (reusable workflow)
 
-Copy [`call_copilot_review.yml`](../workflows/call_copilot_review.yml) into your
-repository at `.github/workflows/ai-review.yml` and set the `COPILOT_TOKEN`
-repository secret (fine-grained PAT with **Copilot Requests** permission).
+Add a caller workflow in your repository (e.g. `.github/workflows/ai-review.yml`)
+and set the `COPILOT_TOKEN` repository secret (fine-grained PAT with **Copilot
+Requests** permission).
 
-The caller workflow supports two trigger modes:
+The example below supports two trigger modes:
 
 1. **PR comment** — type `/ai-review` on any pull request
 2. **Manual dispatch** — run from the Actions tab for any PR number
@@ -57,13 +57,35 @@ Comment flags:
 /ai-review --inline --tool opencode  — combine flags
 ```
 
-Minimal caller example (comment-triggered only):
+Full caller example:
 
 ```yaml
 name: AI Code Review
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request number to review'
+        required: true
+        type: number
+      tool:
+        description: 'AI CLI tool: copilot or opencode'
+        required: false
+        type: choice
+        options: [copilot, opencode]
+        default: copilot
+      model:
+        description: 'AI model override (leave empty for default)'
+        required: false
+        type: string
+        default: ''
+      inline_review:
+        description: 'Post findings as inline PR review comments'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -73,13 +95,20 @@ permissions:
 jobs:
   prepare:
     if: >-
-      github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/ai-review')
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/ai-review'))
     runs-on: ubuntu-latest
     outputs:
-      pr_number: ${{ github.event.issue.number }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      tool: ${{ steps.resolve.outputs.tool }}
+      model: ${{ steps.resolve.outputs.model }}
+      inline_review: ${{ steps.resolve.outputs.inline_review }}
+      comment_id: ${{ steps.resolve.outputs.comment_id }}
     steps:
       - name: Verify commenter has write access
+        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENTER: ${{ github.event.comment.user.login }}
@@ -91,12 +120,56 @@ jobs:
             *) echo "::error::Unauthorized"; exit 1 ;;
           esac
 
+      - name: Resolve inputs
+        id: resolve
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_TOOL: ${{ inputs.tool }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_INLINE_REVIEW: ${{ inputs.inline_review }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "pr_number=$INPUT_PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "tool=$INPUT_TOOL" >> "$GITHUB_OUTPUT"
+            echo "model=$INPUT_MODEL" >> "$GITHUB_OUTPUT"
+            echo "inline_review=$INPUT_INLINE_REVIEW" >> "$GITHUB_OUTPUT"
+            echo "comment_id=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pr_number="$ISSUE_NUMBER"
+          comment_id="$ISSUE_COMMENT_ID"
+          tool="copilot"; model=""; inline_review="false"
+          if echo "$COMMENT_BODY" | grep -qoP -- '--tool\s+\K\S+'; then
+            tool=$(echo "$COMMENT_BODY" | grep -oP -- '--tool\s+\K\S+')
+          fi
+          if echo "$COMMENT_BODY" | grep -qoP -- '--model\s+\K\S+'; then
+            model=$(echo "$COMMENT_BODY" | grep -oP -- '--model\s+\K\S+')
+          fi
+          if echo "$COMMENT_BODY" | grep -q -- '--inline'; then
+            inline_review="true"
+          fi
+          if [ "$tool" != "copilot" ] && [ "$tool" != "opencode" ]; then
+            echo "::error::Invalid tool '$tool'"; exit 1
+          fi
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "tool=$tool" >> "$GITHUB_OUTPUT"
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "inline_review=$inline_review" >> "$GITHUB_OUTPUT"
+          echo "comment_id=$comment_id" >> "$GITHUB_OUTPUT"
+
   review:
     needs: prepare
     uses: scylladb/github-automation/.github/workflows/copilot-review.yaml@main
     with:
       pr_number: ${{ fromJSON(needs.prepare.outputs.pr_number) }}
-      inline_review: true
+      tool: ${{ needs.prepare.outputs.tool }}
+      model: ${{ needs.prepare.outputs.model }}
+      inline_review: ${{ fromJSON(needs.prepare.outputs.inline_review) }}
+      comment_id: ${{ fromJSON(needs.prepare.outputs.comment_id) }}
     secrets:
       COPILOT_TOKEN: ${{ secrets.COPILOT_TOKEN }}
 ```
