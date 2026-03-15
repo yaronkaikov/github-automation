@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -118,6 +119,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 MODEL_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
+REPO_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
 DEFAULT_MODELS = {
     "copilot": "claude-sonnet-4",
@@ -128,6 +130,13 @@ DEFAULT_MODELS = {
 def validate_model(model):
     if not MODEL_RE.match(model):
         print(f"ERROR: Invalid model name: {model}", file=sys.stderr)
+        sys.exit(1)
+
+
+def validate_repo(repo):
+    """Validate repo is in owner/name format to prevent path traversal."""
+    if not REPO_RE.match(repo):
+        print(f"ERROR: Invalid repository format: {repo!r} (expected owner/name)", file=sys.stderr)
         sys.exit(1)
 
 
@@ -485,6 +494,86 @@ def react(repo, comment_id, emoji):
 
 
 # ---------------------------------------------------------------------------
+# Terminal table for local output
+# ---------------------------------------------------------------------------
+
+def _truncate(text, width):
+    """Truncate text to width, adding ellipsis if needed."""
+    # Collapse whitespace and strip HTML tags for terminal display
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= width:
+        return text
+    return text[:width - 1] + "\u2026"
+
+
+def format_terminal_table(findings):
+    """Render parsed inline findings as a bordered terminal table.
+
+    Produces output like:
+    +----+----------+-------------------------------+------+----------+---------------------------+
+    | #  | Severity | File                          | Line | Category | Description               |
+    +----+----------+-------------------------------+------+----------+---------------------------+
+    | 1  | CR       | path/to/file.py               |   42 | Bug      | Missing null check on ... |
+    +----+----------+-------------------------------+------+----------+---------------------------+
+    """
+    if not findings:
+        return "  (no findings)\n"
+
+    severity_map = {
+        "\U0001f534": "CR",   # 🔴 Critical
+        "\U0001f7e0": "HI",   # 🟠 High
+        "\U0001f7e1": "MD",   # 🟡 Medium
+        "\U0001f535": "LO",   # 🔵 Low
+    }
+
+    rows = []
+    for i, f in enumerate(findings, 1):
+        # Parse severity and category from the body (format: "SEV **Category**: Description")
+        body = f["body"]
+        sev_char = body[0] if body else ""
+        sev = severity_map.get(sev_char, "??")
+
+        cat_match = re.match(r".\s*\*\*(\w+)\*\*:\s*(.*)", body, re.DOTALL)
+        if cat_match:
+            category = cat_match.group(1)
+            description = cat_match.group(2).split("\n")[0]  # First line only
+        else:
+            category = ""
+            description = body.split("\n")[0]
+
+        rows.append((
+            str(i),
+            sev,
+            _truncate(f["path"], 40),
+            str(f["line"]),
+            _truncate(category, 12),
+            _truncate(description, 50),
+        ))
+
+    # Calculate column widths
+    headers = ("#", "Sev", "File", "Line", "Category", "Description")
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for j, cell in enumerate(row):
+            widths[j] = max(widths[j], len(cell))
+
+    def fmt_row(cells):
+        parts = []
+        for cell, w in zip(cells, widths):
+            parts.append(f" {cell:<{w}} ")
+        return "|" + "|".join(parts) + "|"
+
+    sep = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+    lines = [sep, fmt_row(headers), sep]
+    for row in rows:
+        lines.append(fmt_row(row))
+    lines.append(sep)
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Inline review — parse findings from the markdown table
 # ---------------------------------------------------------------------------
 
@@ -707,11 +796,11 @@ def post_inline_review(repo, pr_number, head_sha, findings, model, tool):
     if head_sha:
         payload["commit_id"] = head_sha
 
-    payload_file = os.path.join("/tmp", "inline_review_payload.json")
-    with open(payload_file, "w") as f:
-        json.dump(payload, f)
-
+    fd, payload_file = tempfile.mkstemp(suffix=".json", prefix="inline_review_")
     try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f)
+
         run_cmd(
             ["gh", "api",
              f"repos/{owner}/{name}/pulls/{pr_number}/reviews",
@@ -739,6 +828,8 @@ def main():
         args.model = DEFAULT_MODELS.get(args.tool, "claude-sonnet-4")
 
     validate_model(args.model)
+    if args.repo:
+        validate_repo(args.repo)
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Fetch PR metadata (title, base branch, head SHA)
@@ -836,7 +927,7 @@ def main():
         print(review_text)
         if inline_findings:
             print(f"\n--- Inline findings ({len(inline_findings)}) ---\n")
-            print(json.dumps(inline_findings, indent=2))
+            print(format_terminal_table(inline_findings))
         return 0
 
     # ---- Post comment ----

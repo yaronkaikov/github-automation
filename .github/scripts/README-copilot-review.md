@@ -112,8 +112,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMENTER: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
         run: |
-          perm=$(gh api "repos/${{ github.repository }}/collaborators/${COMMENTER}/permission" \
+          perm=$(gh api "repos/${REPO}/collaborators/${COMMENTER}/permission" \
                    --jq '.permission')
           case "$perm" in
             admin|maintain|write) echo "Authorized (${perm})" ;;
